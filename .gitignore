@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+
+# Vercel
+.vercel/
+
+# Env / secrets — must NEVER be committed
+.env
+.env.*
+*.env
+
+# If server/agent files ever land here by accident
+server.py
+agent.c
+agent.exe
+resource.rc
+resource.h
+
+# Data / loot
+loot/
+agents_state.json
+results.jsonl
+
+# Operator session data — never commit
+cookies.json
+tokens.json
+chrome-profile/
+*.cookies
+
+# OS noise
+.DS_Store
+Thumbs.db

@@ -1,0 +1,158 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Control</title>
+<style>
+body{font-family:monospace;background:#111;color:#ccc;margin:1em}
+canvas{border:1px solid #444;max-width:100%;cursor:crosshair}
+button,input{font-family:monospace;background:#222;color:#ccc;border:1px solid #444;padding:4px 8px;margin:2px}
+.err{color:#f88}
+.diag{color:#7cf;font-size:0.85em;white-space:pre-wrap}
+</style>
+</head>
+<body>
+<h3>Remote Control: <span id="aid"></span></h3>
+<label><input type="checkbox" id="follow"> follow mouse (hover = move)</label>
+<input id="txt" size="40" placeholder="type text and click send">
+<button id="typebtn">send text</button>
+<p>Click into this page first so keyboard events reach it.</p>
+<canvas id="c" width="1280" height="720"></canvas>
+<p class="err" id="err"></p>
+<p class="diag" id="diag"></p>
+<script>
+const API = '/api/proxy';
+const aid = new URLSearchParams(location.search).get('aid') || '';
+document.getElementById('aid').textContent = aid;
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const errEl = document.getElementById('err');
+const diagEl = document.getElementById('diag');
+let frameCount = 0;
+let lastDiag = 0;
+let inFlight = false;
+
+function diag(line) { diagEl.textContent = line; }
+
+async function pollFrame() {
+    if (!aid || inFlight) return;
+    inFlight = true;
+    try {
+        const r = await fetch(
+            API + '/api/live/frame-latest/' + encodeURIComponent(aid) +
+            '?t=' + Date.now(),
+            { cache: 'no-store' }
+        );
+        if (r.status === 404) {
+            errEl.textContent = 'Waiting for first frame from agent...';
+        } else if (r.ok) {
+            errEl.textContent = '';
+            const blob = await r.blob();
+            const img = await createImageBitmap(blob);
+            if (canvas.width !== img.width || canvas.height !== img.height) {
+                canvas.width = img.width;
+                canvas.height = img.height;
+            }
+            ctx.drawImage(img, 0, 0);
+            frameCount++;
+            const now = Date.now();
+            if (now - lastDiag > 1000) {
+                lastDiag = now;
+                diag('frames received: ' + frameCount);
+            }
+        } else {
+            errEl.textContent = 'Frame fetch failed: HTTP ' + r.status;
+        }
+    } catch (e) {
+        errEl.textContent = 'Frame fetch error: ' + e.message;
+    } finally {
+        inFlight = false;
+    }
+}
+
+if (!aid) {
+    errEl.textContent = 'No agent id in URL.';
+} else {
+    setInterval(pollFrame, 250);
+    pollFrame();
+}
+
+// --- input forwarding ---
+
+let mx = 0, my = 0, lastMv = 0;
+const follow = document.getElementById('follow');
+
+function norm(e){
+    const r = canvas.getBoundingClientRect();
+    const nx = (e.clientX - r.left) * canvas.width / r.width;
+    const ny = (e.clientY - r.top)  * canvas.height / r.height;
+    return [Math.round(nx), Math.round(ny)];
+}
+
+async function send(line){
+    if (!aid) return;
+    try {
+        await fetch(API + '/admin/live/input/' + encodeURIComponent(aid),
+                    {method:'POST', body: line});
+    } catch (e) {}
+}
+
+canvas.addEventListener('mousemove', e => {
+    const [x, y] = norm(e);
+    mx = x; my = y;
+    const now = Date.now();
+    if (follow.checked && now - lastMv > 80) {
+        lastMv = now;
+        send('mv ' + x + ' ' + y);
+    }
+});
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+canvas.addEventListener('mousedown', e => {
+    const [x, y] = norm(e);
+    const btn = e.button === 2 ? 2 : e.button === 1 ? 3 : 1;
+    send('cl ' + x + ' ' + y + ' ' + btn);
+});
+canvas.addEventListener('dblclick', e => {
+    const [x, y] = norm(e);
+    send('dc ' + x + ' ' + y + ' ' + (e.button === 2 ? 2 : 1));
+});
+canvas.addEventListener('wheel', e => {
+    e.preventDefault();
+    send('wh ' + mx + ' ' + my + ' ' + (e.deltaY < 0 ? 1 : -1));
+}, {passive:false});
+
+const special = {
+    Enter:13, Backspace:8, Tab:9, Escape:27, Delete:46,
+    ArrowLeft:37, ArrowUp:38, ArrowRight:39, ArrowDown:40,
+    Home:36, End:35
+};
+document.addEventListener('keydown', e => {
+    const ctrl = e.ctrlKey;
+    if (special[e.key] !== undefined) {
+        e.preventDefault();
+        const vk = special[e.key];
+        send('kd ' + vk);
+        setTimeout(() => send('ku ' + vk), 30);
+        return;
+    }
+    if (e.key.length === 1) {
+        e.preventDefault();
+        if (ctrl) {
+            send('kd 17');
+            send('tx ' + e.key);
+            setTimeout(() => send('ku 17'), 30);
+        } else {
+            send('tx ' + e.key);
+        }
+    }
+});
+
+document.getElementById('typebtn').onclick = () => {
+    const v = document.getElementById('txt').value;
+    if (v) send('tx ' + v);
+    document.getElementById('txt').value = '';
+};
+</script>
+</body>
+</html>

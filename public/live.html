@@ -1,0 +1,77 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Live</title>
+<style>
+body{font-family:monospace;background:#111;color:#ccc;margin:1em}
+canvas{border:1px solid #444;max-width:100%}
+.err{color:#f88}
+.diag{color:#7cf;font-size:0.85em;white-space:pre-wrap}
+</style>
+</head>
+<body>
+<h3>Live View: <span id="aid"></span></h3>
+<canvas id="c" width="1280" height="720"></canvas>
+<p class="err" id="err"></p>
+<p class="diag" id="diag"></p>
+<script>
+const API = '/api/proxy';
+const aid = new URLSearchParams(location.search).get('aid') || '';
+document.getElementById('aid').textContent = aid;
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const errEl = document.getElementById('err');
+const diagEl = document.getElementById('diag');
+let frameCount = 0;
+let lastDiag = 0;
+let inFlight = false;
+
+function diag(line) { diagEl.textContent = line; }
+
+async function pollFrame() {
+    if (!aid || inFlight) return;
+    inFlight = true;
+    try {
+        const r = await fetch(
+            API + '/api/live/frame-latest/' + encodeURIComponent(aid) +
+            '?t=' + Date.now(),
+            { cache: 'no-store' }
+        );
+        if (r.status === 404) {
+            errEl.textContent = 'Waiting for first frame from agent...';
+        } else if (r.ok) {
+            errEl.textContent = '';
+            const blob = await r.blob();
+            const img = await createImageBitmap(blob);
+            if (canvas.width !== img.width || canvas.height !== img.height) {
+                canvas.width = img.width;
+                canvas.height = img.height;
+            }
+            ctx.drawImage(img, 0, 0);
+            frameCount++;
+            const now = Date.now();
+            if (now - lastDiag > 1000) {
+                lastDiag = now;
+                diag('frames received: ' + frameCount);
+            }
+        } else {
+            errEl.textContent = 'Frame fetch failed: HTTP ' + r.status;
+        }
+    } catch (e) {
+        errEl.textContent = 'Frame fetch error: ' + e.message;
+    } finally {
+        inFlight = false;
+    }
+}
+
+if (!aid) {
+    errEl.textContent = 'No agent id in URL.';
+} else {
+    setInterval(pollFrame, 250);
+    pollFrame();
+}
+</script>
+</body>
+</html>

